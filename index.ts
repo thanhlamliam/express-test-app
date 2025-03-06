@@ -3,7 +3,7 @@ import express, { Application, Request, Response } from 'express';
 import mongoose, { Document, Types } from 'mongoose';
 import { Server } from 'socket.io';
 import http from "http";
-import { Game, IPlayer } from './models/game';
+import { Game, IBoard, IPlayer } from './models/game';
 import path from 'path';
 
 // For env file
@@ -15,6 +15,7 @@ const port = process.env.PORT || 8000;
 const mongoDBURL = process.env.MONGODB_URL || 'mongodb://127.0.0.1:27017/liam';
 const server = http.createServer(app);
 const io = new Server(server);
+let winningLine: number[][] = [];
 
 // Serve static files (React build)
 app.use(express.static(path.join(__dirname, './public')));
@@ -24,8 +25,13 @@ function generateUniqueGameId(): string {
   return Math.random().toString(36).substring(2, 9);
 }
 
-function initializeBoard(size: number = 24): string[][] {
-  return Array(size).fill('').map(() => Array(size).fill(''));
+function initializeBoard(size: number = 24): IBoard[][] {
+  return Array.from({ length: 24 }, () =>
+    Array.from({ length: 24 }, () => ({
+      value: '',
+      isWin: false
+    }))
+  );
 }
 
 function getPlayerMark(playerId: string, players: Types.DocumentArray<IPlayer>): 'X' | 'O' {
@@ -44,9 +50,9 @@ function getOpponentId(playerId: string, players: Types.DocumentArray<IPlayer>):
   return opponent.id;
 }
 
-function checkWin(board: string[][], x: number, y: number): boolean {
+function checkWin(board: IBoard[][], row: number, col: number): boolean {
   let winningArr = [], preventArr = [];
-  let currentUser = board[x][y];
+  let currentUser = board[row][col].value;
   if (!currentUser) return false;
 
   const directions = [
@@ -70,28 +76,30 @@ function checkWin(board: string[][], x: number, y: number): boolean {
 
   for (const direction of directions) {
     let count = 1;
+    winningArr = [];
     preventArr = [];
 
     for (const [dx, dy] of direction) {
-      let newX = x + dx;
-      let newY = y + dy;
+      winningArr.push([row, col]);
+      let newRow = row + dx;
+      let newCol = col + dy;
 
       while (
-        newX >= 0 &&
-        newX < board[0].length &&
-        newY >= 0 &&
-        newY < board.length
+        newRow >= 0 &&
+        newRow < board.length &&
+        newCol >= 0 &&
+        newCol < board.length
       ) {
-        if (currentUser && board[newX][newY] && currentUser !== board[newX][newY]) {
-          preventArr.push([newX, newY]);
+        if (currentUser && board[newRow][newCol].value && currentUser !== board[newRow][newCol].value) {
+          preventArr.push([newRow, newCol]);
           break;
         }
 
-        if (currentUser === board[newX][newY]) {
-          winningArr.push([newX, newY]);
+        if (currentUser === board[newRow][newCol].value) {
+          winningArr.push([newRow, newCol]);
           count++;
-          newX = newX + dx;
-          newY = newY + dy;
+          newRow = newRow + dx;
+          newCol = newCol + dy;
         } else {
           break;
         }
@@ -99,10 +107,12 @@ function checkWin(board: string[][], x: number, y: number): boolean {
     }
 
     if ((count >= 5 && preventArr.length === 1) || (count === 4 && preventArr.length === 0)) {
+      winningLine = winningArr;
       return true;
     }
   }
 
+  winningArr = [];
   return false;
 }
 
@@ -163,7 +173,7 @@ io.on("connection", (socket) => {
   });
 
   // Move
-  socket.on("makeMove", async (gameId: string, x: number, y: number) => {
+  socket.on("makeMove", async (gameId: string, row: number, col: number) => {
     try {
       const game = await Game.findOne({ gameId });
 
@@ -177,15 +187,25 @@ io.on("connection", (socket) => {
         return;
       }
 
-      if (game.board[y][x] !== '') {
+      if (game.board[row][col].value !== '') {
         socket.emit('error', 'Cell already occupied');
         return;
       }
 
       const mark = getPlayerMark(socket.id, game.players);
-      game.board[y][x] = mark;
+      game.board[row][col].value = mark;
 
-      if (checkWin(game.board, x, y)) {
+      if (checkWin(game.board, row, col)) {
+        const newBoard = game.board.map((row, rowIndex) => {
+          return row.map((cell, colIndex) => {
+            return {
+              ...cell,
+              isWin: winningLine.some((e) => e[0] === rowIndex && e[1] === colIndex),
+            }
+          })
+        })
+        game.board = newBoard;
+        io.to(gameId).emit('boardUpdated', game.board);
         io.to(gameId).emit('gameOver', { winner: socket.id, board: game.board });
         console.log(`Game ${gameId} won by ${socket.id}`);
       } else {
